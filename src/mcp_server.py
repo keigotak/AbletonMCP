@@ -9,6 +9,8 @@ import asyncio
 import json
 import sys
 import os
+import random
+import math
 from typing import Any
 
 # プロジェクトルートをパスに追加
@@ -322,6 +324,31 @@ async def handle_list_tools() -> list[types.Tool]:
             description="利用可能なジャンル一覧を取得",
             inputSchema={"type": "object", "properties": {}}
         ),
+
+        # 動的パターン生成
+        types.Tool(
+            name="execute_pattern",
+            description="Pythonコードで定義されたMIDIパターンを実行。Claudeが生成したコードでカスタムパターンを作成できる",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "track_name": {
+                        "type": "string",
+                        "description": "トラック名"
+                    },
+                    "notes_code": {
+                        "type": "string",
+                        "description": "MIDIノートを生成するPythonコード。notes変数に[(pitch, start, duration, velocity, mute), ...]形式で代入。bars変数が利用可能。"
+                    },
+                    "bars": {
+                        "type": "number",
+                        "description": "小節数",
+                        "default": 4
+                    }
+                },
+                "required": ["track_name", "notes_code"]
+            }
+        ),
     ]
 
 
@@ -602,7 +629,72 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
         elif name == "list_genres":
             genres = get_available_genres()
             result = f"🎵 利用可能なジャンル:\n  " + ", ".join(genres)
-        
+
+        # ========== 動的パターン生成 ==========
+        elif name == "execute_pattern":
+            track_name = args["track_name"]
+            notes_code = args["notes_code"]
+            bars = args.get("bars", 4)
+
+            # 安全な実行環境を構築
+            # 許可する組み込み関数のみを提供
+            safe_builtins = {
+                'range': range,
+                'len': len,
+                'int': int,
+                'float': float,
+                'abs': abs,
+                'min': min,
+                'max': max,
+                'round': round,
+                'list': list,
+                'tuple': tuple,
+                'enumerate': enumerate,
+                'zip': zip,
+                'sum': sum,
+                'sorted': sorted,
+                'reversed': reversed,
+                'True': True,
+                'False': False,
+                # 音楽生成に便利なモジュール
+                'random': random,
+                'math': math,
+            }
+
+            # 実行環境の変数
+            local_vars = {
+                "notes": [],
+                "bars": bars,
+            }
+
+            try:
+                exec(notes_code, {"__builtins__": safe_builtins}, local_vars)
+                notes = local_vars["notes"]
+
+                if not isinstance(notes, list):
+                    raise ValueError("notes must be a list")
+
+                track_index = state.track_counter
+
+                if not state.mock_mode and state.osc:
+                    state.osc.create_midi_track(track_index)
+                    state.osc.set_track_name(track_index, track_name)
+                    state.osc.create_clip(track_index, 0, bars * 4.0)
+                    state.osc.add_notes(track_index, 0, notes)
+
+                state.tracks.append({
+                    "name": track_name,
+                    "type": "custom_pattern",
+                    "note_count": len(notes),
+                    "index": track_index
+                })
+                state.track_counter += 1
+
+                result = f"🎵 '{track_name}' トラックを作成しました（{len(notes)}ノート, {bars}小節）"
+
+            except Exception as e:
+                result = f"[ERR] パターン実行エラー: {str(e)}"
+
         else:
             result = f"[ERR] 未知のツール: {name}"
             
@@ -610,6 +702,107 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
         result = f"[ERR] エラー: {str(e)}"
     
     return [types.TextContent(type="text", text=result)]
+
+
+# ==================== プロンプト ====================
+
+MUSIC_PATTERN_GUIDE = """
+# execute_pattern ツール ガイド
+
+## MIDIノート形式
+(pitch, start_time, duration, velocity, mute)
+- pitch: 0-127 (60=C4, 36=C2, C1=24)
+- start_time: 拍単位 (4.0=1小節)
+- duration, velocity: 0-127
+- mute: 0/1
+
+## ドラムマップ
+36=Kick, 38=Snare, 37=Rimshot, 39=Clap, 42=HH-Closed, 46=HH-Open, 49=Crash
+
+## スケール
+MAJOR=[0,2,4,5,7,9,11], MINOR=[0,2,3,5,7,8,10], DORIAN=[0,2,3,5,7,9,10]
+PENTATONIC=[0,3,5,7,10], BLUES=[0,3,5,6,7,10]
+
+## コード
+MAJOR=[0,4,7], MINOR=[0,3,7], MAJ7=[0,4,7,11], MIN7=[0,3,7,10], DOM7=[0,4,7,10]
+
+## ジャンル別パターン
+
+### EDM/House (BPM 120-130): 4つ打ち + オフビートHH
+### Trap (BPM 140-160): シンコペKick + 16分HH
+### Lo-Fi (BPM 70-90): スウィング + ゴーストノート
+### DnB (BPM 170-180): 2ステップ + ブレイクビーツ
+### Funk (BPM 100-120): シンコペーション重視
+### Reggae (BPM 70-90): One Drop (1拍目キックなし)
+
+## 雰囲気→音楽変換
+- エモい/切ない: マイナー、min7多用、ゆっくり、vel 60-80
+- 攻撃的/激しい: マイナー、速い16分、vel 90-127
+- 明るい: メジャー、跳ねるリズム、vel 70-90
+- 浮遊感: ペンタトニック、sus4、まばら、vel 40-70
+- グルーヴィー: シンコペ、ゴーストノート、16分スタッカート
+
+## 例: Trapビート
+```python
+notes = []
+for bar in range(bars):
+    t = bar * 4
+    notes.append((36, t, 0.5, 100, 0))
+    notes.append((36, t + 2.5, 0.25, 90, 0))
+    notes.append((38, t + 1, 0.25, 100, 0))
+    notes.append((38, t + 3, 0.25, 100, 0))
+    for i in range(16):
+        vel = 80 if i % 4 == 0 else 50
+        notes.append((42, t + i * 0.25, 0.1, vel, 0))
+```
+
+## 例: ファンキーベース
+```python
+notes = []
+root = 36
+for bar in range(bars):
+    t = bar * 4
+    notes.append((root, t, 0.2, 100, 0))
+    notes.append((root + 7, t + 0.75, 0.2, 90, 0))
+    notes.append((root + 5, t + 1.25, 0.2, 85, 0))
+    notes.append((root, t + 2, 0.3, 95, 0))
+    notes.append((root + 10, t + 2.75, 0.2, 80, 0))
+```
+
+## 利用可能: range, len, min, max, random, math, enumerate, zip
+## 変数: bars (小節数), notes (結果リスト)
+"""
+
+
+@server.list_prompts()
+async def handle_list_prompts() -> list[types.Prompt]:
+    """利用可能なプロンプト"""
+    return [
+        types.Prompt(
+            name="music-pattern-guide",
+            description="execute_patternツールでカスタムMIDIパターンを作成するためのガイド",
+            arguments=[]
+        )
+    ]
+
+
+@server.get_prompt()
+async def handle_get_prompt(name: str, arguments: dict | None) -> types.GetPromptResult:
+    """プロンプト取得"""
+    if name == "music-pattern-guide":
+        return types.GetPromptResult(
+            description="MIDIパターン生成ガイド",
+            messages=[
+                types.PromptMessage(
+                    role="user",
+                    content=types.TextContent(
+                        type="text",
+                        text=MUSIC_PATTERN_GUIDE
+                    )
+                )
+            ]
+        )
+    raise ValueError(f"Unknown prompt: {name}")
 
 
 # ==================== リソース ====================
