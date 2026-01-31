@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ableton-agent": {
+      "command": "python",
+      "args": ["-m", "src.mcp_server"],
+      "cwd": "/path/to/AbletonMCP"
+    }
+  }
+}
