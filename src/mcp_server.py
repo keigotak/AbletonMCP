@@ -9,8 +9,6 @@ import asyncio
 import json
 import sys
 import os
-import random
-import math
 from typing import Any
 
 # プロジェクトルートをパスに追加
@@ -282,6 +280,29 @@ async def handle_list_tools() -> list[types.Tool]:
                 "required": ["track_index", "volume"]
             }
         ),
+        types.Tool(
+            name="set_device_parameter",
+            description="デバイス/エフェクトのパラメータを設定",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "track_index": {"type": "integer", "description": "トラック番号"},
+                    "device_index": {"type": "integer", "description": "デバイス番号（0から、音源=0, 最初のエフェクト=1）"},
+                    "param_index": {"type": "integer", "description": "パラメータ番号"},
+                    "value": {"type": "number", "description": "値 (0.0-1.0)"}
+                },
+                "required": ["track_index", "device_index", "param_index", "value"]
+            }
+        ),
+        types.Tool(
+            name="apply_lofi_settings",
+            description="Lo-Fi Hip Hop用のエフェクト設定を一括適用",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        ),
         
         # アレンジメント
         types.Tool(
@@ -320,34 +341,49 @@ async def handle_list_tools() -> list[types.Tool]:
             inputSchema={"type": "object", "properties": {}}
         ),
         types.Tool(
+            name="get_track_info",
+            description="トラックの詳細情報を取得（名前、ボリューム、パン）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "track_index": {"type": "integer", "description": "トラック番号"}
+                },
+                "required": ["track_index"]
+            }
+        ),
+        types.Tool(
+            name="get_device_params",
+            description="デバイス/エフェクトのパラメータ一覧と現在値を取得",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "track_index": {"type": "integer", "description": "トラック番号"},
+                    "device_index": {"type": "integer", "description": "デバイス番号（音源=0, 最初のエフェクト=1）"}
+                },
+                "required": ["track_index", "device_index"]
+            }
+        ),
+        types.Tool(
             name="list_genres",
             description="利用可能なジャンル一覧を取得",
             inputSchema={"type": "object", "properties": {}}
         ),
-
-        # 動的パターン生成
         types.Tool(
-            name="execute_pattern",
-            description="Pythonコードで定義されたMIDIパターンを実行。Claudeが生成したコードでカスタムパターンを作成できる",
+            name="debug_osc",
+            description="OSCデバッグ：指定したアドレスにメッセージを送信し、応答を確認",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "track_name": {
-                        "type": "string",
-                        "description": "トラック名"
-                    },
-                    "notes_code": {
-                        "type": "string",
-                        "description": "MIDIノートを生成するPythonコード。notes変数に[(pitch, start, duration, velocity, mute), ...]形式で代入。bars変数が利用可能。"
-                    },
-                    "bars": {
-                        "type": "number",
-                        "description": "小節数",
-                        "default": 4
-                    }
+                    "address": {"type": "string", "description": "OSCアドレス"},
+                    "args": {"type": "array", "description": "引数リスト", "default": []}
                 },
-                "required": ["track_name", "notes_code"]
+                "required": ["address"]
             }
+        ),
+        types.Tool(
+            name="scan_all_params",
+            description="全トラックの全デバイス・パラメータをスキャン",
+            inputSchema={"type": "object", "properties": {}}
         ),
     ]
 
@@ -574,6 +610,57 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
             
             result = f"🔊 Track {track_idx} のボリュームを {volume} に設定"
         
+        elif name == "set_device_parameter":
+            track_idx = args["track_index"]
+            device_idx = args["device_index"]
+            param_idx = args["param_index"]
+            value = args["value"]
+            
+            if not state.mock_mode and state.osc:
+                state.osc.set_device_parameter(track_idx, device_idx, param_idx, value)
+            
+            result = f"🎛️ Track {track_idx} Device {device_idx} Param {param_idx} = {value}"
+        
+        elif name == "apply_lofi_settings":
+            # Lo-Fi用の一括設定
+            settings_applied = []
+            
+            if not state.mock_mode and state.osc:
+                # Compressor設定 (一般的なパラメータ: Threshold=0, Ratio=1, Attack=2, Release=3)
+                # Track 0 (Lo-Fi Drums) - Compressor
+                state.osc.set_device_parameter(0, 1, 0, 0.4)  # Threshold
+                state.osc.set_device_parameter(0, 1, 1, 0.5)  # Ratio ~4:1
+                state.osc.set_device_parameter(0, 1, 2, 0.15) # Attack
+                state.osc.set_device_parameter(0, 1, 3, 0.3)  # Release
+                settings_applied.append("Track 0: Compressor調整")
+                
+                # Track 1 (Lo-Fi Chords) - Reverb (Decay=0, Dry/Wet=5 or similar)
+                state.osc.set_device_parameter(1, 1, 5, 0.25)  # Dry/Wet 25%
+                state.osc.set_device_parameter(1, 1, 0, 0.5)   # Decay
+                settings_applied.append("Track 1: Reverb調整")
+                
+                # Track 1 - Chorus (Rate, Amount)
+                state.osc.set_device_parameter(1, 2, 0, 0.2)  # Rate
+                state.osc.set_device_parameter(1, 2, 1, 0.3)  # Amount
+                settings_applied.append("Track 1: Chorus調整")
+                
+                # Track 2 (Lo-Fi Bass) - Compressor
+                state.osc.set_device_parameter(2, 1, 0, 0.35)
+                state.osc.set_device_parameter(2, 1, 1, 0.45)
+                settings_applied.append("Track 2: Compressor調整")
+                
+                # Track 6 (Melody) - Reverb
+                state.osc.set_device_parameter(6, 1, 5, 0.35)  # Dry/Wet 35%
+                state.osc.set_device_parameter(6, 1, 0, 0.6)   # Decay longer
+                settings_applied.append("Track 6: Reverb調整")
+                
+                # Track 6 - Delay
+                state.osc.set_device_parameter(6, 2, 1, 0.3)   # Feedback 30%
+                state.osc.set_device_parameter(6, 2, 5, 0.2)   # Dry/Wet 20%
+                settings_applied.append("Track 6: Delay調整")
+            
+            result = "🎛️ Lo-Fi設定を適用:\n  " + "\n  ".join(settings_applied)
+        
         # ========== アレンジメント ==========
         elif name == "generate_arrangement":
             genre = args["genre"]
@@ -629,72 +716,87 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
         elif name == "list_genres":
             genres = get_available_genres()
             result = f"🎵 利用可能なジャンル:\n  " + ", ".join(genres)
-
-        # ========== 動的パターン生成 ==========
-        elif name == "execute_pattern":
-            track_name = args["track_name"]
-            notes_code = args["notes_code"]
-            bars = args.get("bars", 4)
-
-            # 安全な実行環境を構築
-            # 許可する組み込み関数のみを提供
-            safe_builtins = {
-                'range': range,
-                'len': len,
-                'int': int,
-                'float': float,
-                'abs': abs,
-                'min': min,
-                'max': max,
-                'round': round,
-                'list': list,
-                'tuple': tuple,
-                'enumerate': enumerate,
-                'zip': zip,
-                'sum': sum,
-                'sorted': sorted,
-                'reversed': reversed,
-                'True': True,
-                'False': False,
-                # 音楽生成に便利なモジュール
-                'random': random,
-                'math': math,
-            }
-
-            # 実行環境の変数
-            local_vars = {
-                "notes": [],
-                "bars": bars,
-            }
-
-            try:
-                exec(notes_code, {"__builtins__": safe_builtins}, local_vars)
-                notes = local_vars["notes"]
-
-                if not isinstance(notes, list):
-                    raise ValueError("notes must be a list")
-
-                track_index = state.track_counter
-
-                if not state.mock_mode and state.osc:
-                    state.osc.create_midi_track(track_index)
-                    state.osc.set_track_name(track_index, track_name)
-                    state.osc.create_clip(track_index, 0, bars * 4.0)
-                    state.osc.add_notes(track_index, 0, notes)
-
-                state.tracks.append({
-                    "name": track_name,
-                    "type": "custom_pattern",
-                    "note_count": len(notes),
-                    "index": track_index
-                })
-                state.track_counter += 1
-
-                result = f"🎵 '{track_name}' トラックを作成しました（{len(notes)}ノート, {bars}小節）"
-
-            except Exception as e:
-                result = f"[ERR] パターン実行エラー: {str(e)}"
-
+        
+        elif name == "get_track_info":
+            track_idx = args["track_index"]
+            
+            if not state.mock_mode and state.osc:
+                info = state.osc.get_track_info(track_idx)
+                result = f"📊 Track {track_idx} 情報:\n"
+                result += f"  名前: {info.get('name', 'Unknown')}\n"
+                result += f"  ボリューム: {info.get('volume', 'N/A')}\n"
+                result += f"  パン: {info.get('pan', 'N/A')}"
+            else:
+                result = f"📊 Track {track_idx} 情報（モックモード）"
+        
+        elif name == "get_device_params":
+            track_idx = args["track_index"]
+            device_idx = args["device_index"]
+            
+            if not state.mock_mode and state.osc:
+                params = state.osc.get_device_parameters(track_idx, device_idx)
+                result = f"🎛️ Track {track_idx} Device {device_idx} パラメータ:\n"
+                
+                if params:
+                    # パラメータ名のリストが返る場合
+                    for i, param in enumerate(params[2:] if len(params) > 2 else params):  # 最初の2つはtrack/device index
+                        value = state.osc.get_device_parameter_value(track_idx, device_idx, i)
+                        val_str = f"{value:.2f}" if value is not None else "N/A"
+                        result += f"  [{i}] {param}: {val_str}\n"
+                else:
+                    result += "  パラメータを取得できませんでした"
+            else:
+                result = f"🎛️ Track {track_idx} Device {device_idx} パラメータ（モックモード）"
+        
+        elif name == "debug_osc":
+            address = args["address"]
+            osc_args = args.get("args", [])
+            
+            if not state.mock_mode and state.osc:
+                # query_rawで全応答をキャプチャ
+                responses = state.osc.query_raw(address, osc_args, timeout=0.5)
+                result = f"OSC Debug: {address} {osc_args}\n"
+                result += f"Responses ({len(responses)}):\n"
+                for addr, params in responses:
+                    result += f"  {addr}: {params}\n"
+                if not responses:
+                    result += "  (no response received)"
+            else:
+                result = "Debug: mock mode"
+        
+        elif name == "scan_all_params":
+            if not state.mock_mode and state.osc:
+                result = "=== Full Parameter Scan ===\n\n"
+                
+                # トラック数取得
+                num_tracks = 7  # デフォルト
+                
+                for track_idx in range(num_tracks):
+                    # デバイス一覧取得
+                    devices_resp = state.osc.query_raw("/live/track/get/devices/name", [track_idx], timeout=0.3)
+                    
+                    track_line = f"[Track {track_idx}]"
+                    if devices_resp:
+                        for addr, params in devices_resp:
+                            if params:
+                                track_line += f" {params}"
+                    result += track_line + "\n"
+                    
+                    # 各デバイスのパラメータ（最大5デバイス）
+                    for dev_idx in range(5):
+                        params_resp = state.osc.query_raw("/live/device/get/parameters/name", [track_idx, dev_idx], timeout=0.3)
+                        if params_resp:
+                            for addr, params in params_resp:
+                                if len(params) > 2:
+                                    result += f"  Device {dev_idx}: {params[2:][:10]}...\n"  # 最初の10パラメータ
+                                    break
+                        else:
+                            break  # デバイスがない
+                    
+                    result += "\n"
+            else:
+                result = "Scan: mock mode"
+        
         else:
             result = f"[ERR] 未知のツール: {name}"
             
@@ -702,107 +804,6 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
         result = f"[ERR] エラー: {str(e)}"
     
     return [types.TextContent(type="text", text=result)]
-
-
-# ==================== プロンプト ====================
-
-MUSIC_PATTERN_GUIDE = """
-# execute_pattern ツール ガイド
-
-## MIDIノート形式
-(pitch, start_time, duration, velocity, mute)
-- pitch: 0-127 (60=C4, 36=C2, C1=24)
-- start_time: 拍単位 (4.0=1小節)
-- duration, velocity: 0-127
-- mute: 0/1
-
-## ドラムマップ
-36=Kick, 38=Snare, 37=Rimshot, 39=Clap, 42=HH-Closed, 46=HH-Open, 49=Crash
-
-## スケール
-MAJOR=[0,2,4,5,7,9,11], MINOR=[0,2,3,5,7,8,10], DORIAN=[0,2,3,5,7,9,10]
-PENTATONIC=[0,3,5,7,10], BLUES=[0,3,5,6,7,10]
-
-## コード
-MAJOR=[0,4,7], MINOR=[0,3,7], MAJ7=[0,4,7,11], MIN7=[0,3,7,10], DOM7=[0,4,7,10]
-
-## ジャンル別パターン
-
-### EDM/House (BPM 120-130): 4つ打ち + オフビートHH
-### Trap (BPM 140-160): シンコペKick + 16分HH
-### Lo-Fi (BPM 70-90): スウィング + ゴーストノート
-### DnB (BPM 170-180): 2ステップ + ブレイクビーツ
-### Funk (BPM 100-120): シンコペーション重視
-### Reggae (BPM 70-90): One Drop (1拍目キックなし)
-
-## 雰囲気→音楽変換
-- エモい/切ない: マイナー、min7多用、ゆっくり、vel 60-80
-- 攻撃的/激しい: マイナー、速い16分、vel 90-127
-- 明るい: メジャー、跳ねるリズム、vel 70-90
-- 浮遊感: ペンタトニック、sus4、まばら、vel 40-70
-- グルーヴィー: シンコペ、ゴーストノート、16分スタッカート
-
-## 例: Trapビート
-```python
-notes = []
-for bar in range(bars):
-    t = bar * 4
-    notes.append((36, t, 0.5, 100, 0))
-    notes.append((36, t + 2.5, 0.25, 90, 0))
-    notes.append((38, t + 1, 0.25, 100, 0))
-    notes.append((38, t + 3, 0.25, 100, 0))
-    for i in range(16):
-        vel = 80 if i % 4 == 0 else 50
-        notes.append((42, t + i * 0.25, 0.1, vel, 0))
-```
-
-## 例: ファンキーベース
-```python
-notes = []
-root = 36
-for bar in range(bars):
-    t = bar * 4
-    notes.append((root, t, 0.2, 100, 0))
-    notes.append((root + 7, t + 0.75, 0.2, 90, 0))
-    notes.append((root + 5, t + 1.25, 0.2, 85, 0))
-    notes.append((root, t + 2, 0.3, 95, 0))
-    notes.append((root + 10, t + 2.75, 0.2, 80, 0))
-```
-
-## 利用可能: range, len, min, max, random, math, enumerate, zip
-## 変数: bars (小節数), notes (結果リスト)
-"""
-
-
-@server.list_prompts()
-async def handle_list_prompts() -> list[types.Prompt]:
-    """利用可能なプロンプト"""
-    return [
-        types.Prompt(
-            name="music-pattern-guide",
-            description="execute_patternツールでカスタムMIDIパターンを作成するためのガイド",
-            arguments=[]
-        )
-    ]
-
-
-@server.get_prompt()
-async def handle_get_prompt(name: str, arguments: dict | None) -> types.GetPromptResult:
-    """プロンプト取得"""
-    if name == "music-pattern-guide":
-        return types.GetPromptResult(
-            description="MIDIパターン生成ガイド",
-            messages=[
-                types.PromptMessage(
-                    role="user",
-                    content=types.TextContent(
-                        type="text",
-                        text=MUSIC_PATTERN_GUIDE
-                    )
-                )
-            ]
-        )
-    raise ValueError(f"Unknown prompt: {name}")
 
 
 # ==================== リソース ====================

@@ -42,6 +42,8 @@ class AbletonOSC:
         self._socket: Optional[socket.socket] = None
         self._listener_thread: Optional[threading.Thread] = None
         self._running = False
+        self._capture_all = False
+        self._captured_messages = []
         
     def start_listener(self):
         """ソケットを起動して送受信を開始"""
@@ -76,6 +78,17 @@ class AbletonOSC:
             address = msg.address
             args = list(msg.params)
             
+            # デバッグキャプチャ用
+            if hasattr(self, '_capture_all') and self._capture_all:
+                if hasattr(self, '_captured_messages'):
+                    self._captured_messages.append((address, args))
+            
+            # 待機中のリクエストがあれば応答を保存
+            if hasattr(self, '_pending_response') and self._pending_response is not None:
+                if address == self._pending_response['address']:
+                    self._pending_response['result'] = args
+                    self._pending_response['received'] = True
+            
             # ハンドラを呼び出す
             if address == "/live/song/get/tempo" and args:
                 self._on_tempo(address, *args)
@@ -97,6 +110,76 @@ class AbletonOSC:
             msg.add_arg(arg)
         built = msg.build()
         self._socket.sendto(built.dgram, (self.ableton_host, self.ableton_port))
+    
+    def query(self, address: str, args: list = None, timeout: float = 0.5):
+        """OSCメッセージを送信して応答を待つ"""
+        self._pending_response = {
+            'address': address,
+            'result': None,
+            'received': False
+        }
+        
+        self.send_message(address, args)
+        
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self._pending_response['received']:
+                result = self._pending_response['result']
+                self._pending_response = None
+                return result
+            time.sleep(0.02)
+        
+        self._pending_response = None
+        return None
+    
+    def query_raw(self, address: str, args: list = None, timeout: float = 0.5):
+        """デバッグ用: 全ての応答をキャプチャ"""
+        self._captured_messages = []
+        self._capture_all = True
+        
+        self.send_message(address, args)
+        
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            time.sleep(0.05)
+        
+        self._capture_all = False
+        result = self._captured_messages
+        self._captured_messages = []
+        return result
+    
+    def get_track_info(self, track_index: int) -> dict:
+        """トラック情報を取得"""
+        info = {}
+        
+        # トラック名
+        result = self.query("/live/track/get/name", [track_index])
+        if result:
+            info['name'] = result[1] if len(result) > 1 else result[0]
+        
+        # ボリューム
+        result = self.query("/live/track/get/volume", [track_index])
+        if result:
+            info['volume'] = result[1] if len(result) > 1 else result[0]
+        
+        # パン
+        result = self.query("/live/track/get/panning", [track_index])
+        if result:
+            info['pan'] = result[1] if len(result) > 1 else result[0]
+        
+        return info
+    
+    def get_device_parameters(self, track_index: int, device_index: int) -> list:
+        """デバイスのパラメータ一覧を取得"""
+        result = self.query("/live/device/get/parameters/name", [track_index, device_index])
+        return result if result else []
+    
+    def get_device_parameter_value(self, track_index: int, device_index: int, param_index: int):
+        """デバイスパラメータの現在値を取得"""
+        result = self.query("/live/device/get/parameter/value", [track_index, device_index, param_index])
+        if result and len(result) > 3:
+            return result[3]  # [track, device, param, value]
+        return None
     
     def test_connection(self, timeout: float = 2.0) -> bool:
         """Abletonとの接続をテスト（応答を待つ）"""
@@ -221,6 +304,16 @@ class AbletonOSC:
             "/live/device/set/parameter/value",
             [track_index, device_index, param_index, value]
         )
+    
+    def get_track_devices(self, track_index: int):
+        """トラックのデバイス一覧を取得"""
+        self._devices_response = None
+        self.send_message("/live/track/get/devices/name", [track_index])
+    
+    def get_device_parameters(self, track_index: int, device_index: int):
+        """デバイスのパラメータ一覧を取得"""
+        self._params_response = None
+        self.send_message("/live/device/get/parameters/name", [track_index, device_index])
         
     # ミキサー関連
     def set_track_volume(self, track_index: int, volume: float):
