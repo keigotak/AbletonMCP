@@ -369,21 +369,92 @@ async def handle_list_tools() -> list[types.Tool]:
             inputSchema={"type": "object", "properties": {}}
         ),
         types.Tool(
-            name="debug_osc",
-            description="OSCデバッグ：指定したアドレスにメッセージを送信し、応答を確認",
+            name="osc_send",
+            description="OSCメッセージを直接送信し応答を確認（低レベル操作）",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "address": {"type": "string", "description": "OSCアドレス"},
+                    "address": {"type": "string", "description": "OSCアドレス（例: /live/song/get/tempo）"},
                     "args": {"type": "array", "description": "引数リスト", "default": []}
                 },
                 "required": ["address"]
             }
         ),
         types.Tool(
-            name="scan_all_params",
-            description="全トラックの全デバイス・パラメータをスキャン",
+            name="get_all_devices",
+            description="全トラックのデバイス・パラメータ一覧を取得",
             inputSchema={"type": "object", "properties": {}}
+        ),
+        types.Tool(
+            name="create_scene",
+            description="新しいシーンを作成",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer", "description": "シーン番号"},
+                    "name": {"type": "string", "description": "シーン名"}
+                },
+                "required": ["index", "name"]
+            }
+        ),
+        types.Tool(
+            name="duplicate_clip",
+            description="クリップを別のスロットに複製",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "src_track": {"type": "integer", "description": "コピー元トラック"},
+                    "src_scene": {"type": "integer", "description": "コピー元シーン"},
+                    "dst_track": {"type": "integer", "description": "コピー先トラック"},
+                    "dst_scene": {"type": "integer", "description": "コピー先シーン"}
+                },
+                "required": ["src_track", "src_scene", "dst_track", "dst_scene"]
+            }
+        ),
+        types.Tool(
+            name="delete_clip",
+            description="クリップを削除",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "track": {"type": "integer", "description": "トラック番号"},
+                    "scene": {"type": "integer", "description": "シーン番号"}
+                },
+                "required": ["track", "scene"]
+            }
+        ),
+        types.Tool(
+            name="build_arrangement",
+            description="Lo-Fi曲の自動アレンジメント（シーン構成）を作成",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "style": {"type": "string", "description": "スタイル: simple, standard, extended", "default": "standard"}
+                }
+            }
+        ),
+        types.Tool(
+            name="fire_scene",
+            description="シーンを再生（トリガー）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "scene": {"type": "integer", "description": "シーン番号"}
+                },
+                "required": ["scene"]
+            }
+        ),
+        types.Tool(
+            name="auto_play_scenes",
+            description="全シーンを自動的に順番に再生（各シーンの小節数を指定）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "bars_per_scene": {"type": "integer", "description": "各シーンの小節数", "default": 8},
+                    "start_scene": {"type": "integer", "description": "開始シーン", "default": 0},
+                    "end_scene": {"type": "integer", "description": "終了シーン", "default": 5}
+                }
+            }
         ),
     ]
 
@@ -748,23 +819,22 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
             else:
                 result = f"🎛️ Track {track_idx} Device {device_idx} パラメータ（モックモード）"
         
-        elif name == "debug_osc":
+        elif name == "osc_send":
             address = args["address"]
             osc_args = args.get("args", [])
             
             if not state.mock_mode and state.osc:
-                # query_rawで全応答をキャプチャ
                 responses = state.osc.query_raw(address, osc_args, timeout=0.5)
-                result = f"OSC Debug: {address} {osc_args}\n"
-                result += f"Responses ({len(responses)}):\n"
+                result = f"OSC: {address} {osc_args}\n"
+                result += f"Response ({len(responses)}):\n"
                 for addr, params in responses:
                     result += f"  {addr}: {params}\n"
                 if not responses:
-                    result += "  (no response received)"
+                    result += "  (no response)"
             else:
-                result = "Debug: mock mode"
+                result = "OSC send: mock mode"
         
-        elif name == "scan_all_params":
+        elif name == "get_all_devices":
             if not state.mock_mode and state.osc:
                 result = "=== Full Parameter Scan ===\n\n"
                 
@@ -796,6 +866,129 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
                     result += "\n"
             else:
                 result = "Scan: mock mode"
+        
+        elif name == "create_scene":
+            index = args["index"]
+            scene_name = args["name"]
+            if not state.mock_mode and state.osc:
+                state.osc.send_message("/live/song/create_scene", [index])
+                import time
+                time.sleep(0.1)
+                state.osc.send_message("/live/scene/set/name", [index, scene_name])
+                result = f"🎬 シーン {index} '{scene_name}' を作成しました"
+            else:
+                result = f"シーン作成（モック）: {scene_name}"
+        
+        elif name == "duplicate_clip":
+            src_track = args["src_track"]
+            src_scene = args["src_scene"]
+            dst_track = args["dst_track"]
+            dst_scene = args["dst_scene"]
+            if not state.mock_mode and state.osc:
+                state.osc.send_message("/live/clip_slot/duplicate_clip_to", 
+                                       [src_track, src_scene, dst_track, dst_scene])
+                result = f"📋 クリップ複製: Track{src_track}/Scene{src_scene} → Track{dst_track}/Scene{dst_scene}"
+            else:
+                result = "クリップ複製（モック）"
+        
+        elif name == "delete_clip":
+            track = args["track"]
+            scene = args["scene"]
+            if not state.mock_mode and state.osc:
+                state.osc.send_message("/live/clip_slot/delete_clip", [track, scene])
+                result = f"🗑️ クリップ削除: Track{track}/Scene{scene}"
+            else:
+                result = "クリップ削除（モック）"
+        
+        elif name == "fire_scene":
+            scene = args["scene"]
+            if not state.mock_mode and state.osc:
+                state.osc.send_message("/live/scene/fire", [scene])
+                result = f"▶️ シーン {scene} を再生"
+            else:
+                result = f"シーン再生（モック）: {scene}"
+        
+        elif name == "auto_play_scenes":
+            bars_per_scene = args.get("bars_per_scene", 8)
+            start_scene = args.get("start_scene", 0)
+            end_scene = args.get("end_scene", 5)
+            
+            if not state.mock_mode and state.osc:
+                import time
+                import threading
+                
+                # テンポから1小節の秒数を計算
+                tempo = state.tempo or 85
+                seconds_per_bar = (60 / tempo) * 4  # 4拍で1小節
+                wait_time = seconds_per_bar * bars_per_scene
+                
+                result = f"🎬 自動再生開始\n"
+                result += f"  テンポ: {tempo} BPM\n"
+                result += f"  各シーン: {bars_per_scene}小節 ({wait_time:.1f}秒)\n"
+                result += f"  シーン: {start_scene} → {end_scene}\n\n"
+                
+                def play_sequence():
+                    for scene_idx in range(start_scene, end_scene + 1):
+                        state.osc.send_message("/live/scene/fire", [scene_idx])
+                        time.sleep(wait_time)
+                
+                # バックグラウンドで実行
+                thread = threading.Thread(target=play_sequence)
+                thread.start()
+                
+                result += "✅ バックグラウンドで自動再生中..."
+            else:
+                result = "自動再生（モック）"
+        
+        elif name == "build_arrangement":
+            style = args.get("style", "standard")
+            if not state.mock_mode and state.osc:
+                import time
+                result = "🎼 Lo-Fi アレンジメントを構築中...\n\n"
+                
+                # シーン構成定義
+                scenes = [
+                    {"name": "Intro", "tracks": [5]},           # E-Piano only
+                    {"name": "Verse 1", "tracks": [0, 1, 5]},   # Drums, Bass, E-Piano
+                    {"name": "Chorus 1", "tracks": [0, 1, 2, 3, 4, 5, 6]},  # All
+                    {"name": "Verse 2", "tracks": [0, 1, 2, 5]}, # Drums, Bass, Vibes, E-Piano
+                    {"name": "Chorus 2", "tracks": [0, 1, 2, 3, 4, 5, 6]},  # All
+                    {"name": "Outro", "tracks": [3, 5]},        # Melody, E-Piano
+                ]
+                
+                num_tracks = 7
+                
+                # 元クリップの場所を特定（Scene 1にあると仮定）
+                source_scene = 1
+                
+                for scene_idx, scene_def in enumerate(scenes):
+                    scene_name = scene_def["name"]
+                    active_tracks = scene_def["tracks"]
+                    
+                    # シーン名を設定
+                    state.osc.send_message("/live/scene/set/name", [scene_idx, scene_name])
+                    time.sleep(0.05)
+                    
+                    result += f"[Scene {scene_idx}] {scene_name}\n"
+                    
+                    for track_idx in range(num_tracks):
+                        if track_idx in active_tracks:
+                            # クリップを複製
+                            state.osc.send_message("/live/clip_slot/duplicate_clip_to",
+                                                   [track_idx, source_scene, track_idx, scene_idx])
+                            result += f"  Track {track_idx}: ✅\n"
+                        else:
+                            # クリップを削除（空にする）
+                            state.osc.send_message("/live/clip_slot/delete_clip", [track_idx, scene_idx])
+                            result += f"  Track {track_idx}: ⬜\n"
+                        time.sleep(0.03)
+                    
+                    result += "\n"
+                
+                result += "✅ アレンジメント構築完了！\n"
+                result += "シーンをクリックして再生できます"
+            else:
+                result = "アレンジメント構築（モック）"
         
         else:
             result = f"[ERR] 未知のツール: {name}"
