@@ -159,6 +159,74 @@ for bar in range(bars):
 
 Ableton Liveに [AbletonOSC](https://github.com/ideoforms/AbletonOSC) をインストール必要。
 
+---
+
+## ⚠️ Ableton エフェクト操作時の注意事項
+
+### EQ Eight: フィルタータイプによるパラメータの解釈の違い
+
+EQ Eightでは、**Filter Type（フィルタータイプ）によってGainパラメータの意味が変わる**。
+これを理解せずに操作すると、意図しない結果になる。
+
+| Filter Type | Gainの意味 |
+|-------------|-----------|
+| Bell / Peak | そのままブースト/カット量（+dB = ブースト、-dB = カット） |
+| Low Shelf / High Shelf | シェルフのブースト/カット量 |
+| **Low Pass / High Pass** | **レゾナンス量**（カットオフ周辺の強調）※カット量ではない |
+| Notch | 帯域幅の調整 |
+
+### ローパス/ハイパス使用時の重要ポイント
+
+- **Frequency**: カットオフ周波数（この周波数以上/以下をカット）
+- **Gain**: レゾナンス（カットオフ付近のブースト量）
+- フィルター自体がカット処理を行うので、**マイナスGainでカットするのではない**
+- Gainを上げると、カットオフ周波数付近が強調される（キャラクターが出る）
+
+### 具体例
+
+**高域をカットしてLofi感を出したい場合：**
+
+| 方法 | 設定 | 結果 |
+|------|------|------|
+| ❌ 間違い | Bell + Frequency 8kHz + Gain -4dB | 8kHz付近だけカット（狭い範囲） |
+| ✅ 正解 | Low Pass 12dB + Frequency 8kHz | 8kHz以上を全てカット（広い範囲） |
+| ✅ 正解 | Low Pass 24dB + Frequency 6kHz | より急峻にカット |
+
+**ローパス設定時のGain：**
+- Gain +0dB → フラットなカットオフ
+- Gain +5dB → カットオフ付近がブーストされ、キャラクターが出る
+- マイナスGainにしても「よりカットされる」わけではない
+
+### OSCでEQ Eightを操作する際のパラメータインデックス
+
+Band 4の例（他のバンドも同様のパターン）：
+
+| パラメータ | インデックス | 値の範囲 |
+|-----------|-------------|---------|
+| 4 Filter On A | 36 | 0/1 |
+| 4 Filter Type A | 37 | 0-7（0=Low Pass 12, 1=Low Pass 24, 5=Bell...） |
+| 4 Frequency A | 38 | 0.0-1.0（周波数を正規化した値） |
+| 4 Gain A | 39 | 0.0-1.0（-15dB〜+15dBを正規化） |
+| 4 Resonance A | 40 | 0.0-1.0 |
+
+### Filter Type の値
+
+| 値 | タイプ |
+|----|--------|
+| 0 | Low Pass 12dB |
+| 1 | Low Pass 24dB |
+| 2 | High Pass 12dB |
+| 3 | High Pass 24dB |
+| 4 | Band Pass |
+| 5 | Bell |
+| 6 | Notch |
+| 7 | Low Shelf |
+| 8 | High Shelf |
+
+この仕様を理解して、適切なフィルタータイプとパラメータを選択すること。
+
+---
+
 ## テスト
 
 ```bash

@@ -43,6 +43,8 @@ class AbletonState:
         self.current_arrangement = None
         self.track_counter = 0
         self.mock_mode = True  # 初期はモックモード
+        self.auto_play_cancel = False  # 自動再生キャンセルフラグ
+        self.auto_play_thread = None   # 自動再生スレッド
         
     def connect(self):
         """Abletonに接続"""
@@ -456,6 +458,32 @@ async def handle_list_tools() -> list[types.Tool]:
                 }
             }
         ),
+        types.Tool(
+            name="get_project_overview",
+            description="プロジェクト全体の情報を取得（トラック、クリップ、デバイス一覧）",
+            inputSchema={"type": "object", "properties": {}}
+        ),
+        types.Tool(
+            name="set_all_clips_length",
+            description="全クリップの長さを統一する（小節数を指定）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "bars": {"type": "integer", "description": "小節数（例: 4, 8, 16）", "default": 8}
+                }
+            }
+        ),
+        types.Tool(
+            name="create_lofi_project",
+            description="Lo-Fi Hip Hopプロジェクトを一発で作成（テンプレート）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "tempo": {"type": "number", "description": "テンポ（BPM）", "default": 85},
+                    "key": {"type": "string", "description": "キー（例: Am, C, Fm）", "default": "Am"}
+                }
+            }
+        ),
     ]
 
 
@@ -491,10 +519,15 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
             result = "▶️ 再生を開始しました"
             
         elif name == "stop":
+            # 自動再生スレッドをキャンセル
+            state.auto_play_cancel = True
+            if state.auto_play_thread and state.auto_play_thread.is_alive():
+                state.auto_play_thread.join(timeout=1.0)
+            
             if not state.mock_mode and state.osc:
                 state.osc.stop()
             state.is_playing = False
-            result = "⏹️ 停止しました"
+            result = "⏹️ 停止しました（自動再生もキャンセル）"
         
         # ========== ドラム ==========
         elif name == "create_drum_track":
@@ -917,6 +950,12 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
                 import time
                 import threading
                 
+                # 前回のスレッドをキャンセル
+                state.auto_play_cancel = True
+                if state.auto_play_thread and state.auto_play_thread.is_alive():
+                    state.auto_play_thread.join(timeout=1.0)
+                state.auto_play_cancel = False
+                
                 # テンポから1小節の秒数を計算
                 tempo = state.tempo or 85
                 seconds_per_bar = (60 / tempo) * 4  # 4拍で1小節
@@ -929,14 +968,23 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
                 
                 def play_sequence():
                     for scene_idx in range(start_scene, end_scene + 1):
+                        if state.auto_play_cancel:
+                            break
                         state.osc.send_message("/live/scene/fire", [scene_idx])
-                        time.sleep(wait_time)
+                        # 短い間隔でキャンセルチェック
+                        elapsed = 0
+                        while elapsed < wait_time:
+                            if state.auto_play_cancel:
+                                break
+                            time.sleep(0.1)
+                            elapsed += 0.1
                 
                 # バックグラウンドで実行
-                thread = threading.Thread(target=play_sequence)
-                thread.start()
+                state.auto_play_thread = threading.Thread(target=play_sequence)
+                state.auto_play_thread.start()
                 
-                result += "✅ バックグラウンドで自動再生中..."
+                result += "✅ バックグラウンドで自動再生中...\n"
+                result += "（停止するには「停止して」と言ってください）"
             else:
                 result = "自動再生（モック）"
         
@@ -989,6 +1037,170 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
                 result += "シーンをクリックして再生できます"
             else:
                 result = "アレンジメント構築（モック）"
+        
+        elif name == "get_project_overview":
+            if not state.mock_mode and state.osc:
+                import time
+                result = "📊 プロジェクト概要\n"
+                result += "=" * 40 + "\n\n"
+                
+                # テンポ取得
+                result += f"🎵 テンポ: {state.tempo} BPM\n\n"
+                
+                # トラック数取得
+                resp = state.osc.query_raw("/live/song/get/num_tracks", [], timeout=0.3)
+                num_tracks = 0
+                if resp:
+                    for addr, params in resp:
+                        if params:
+                            num_tracks = params[0]
+                
+                # シーン数取得
+                resp = state.osc.query_raw("/live/song/get/num_scenes", [], timeout=0.3)
+                num_scenes = 0
+                if resp:
+                    for addr, params in resp:
+                        if params:
+                            num_scenes = params[0]
+                
+                result += f"📁 トラック数: {num_tracks}\n"
+                result += f"🎬 シーン数: {num_scenes}\n\n"
+                
+                # 各トラックの情報
+                result += "### トラック一覧\n"
+                for track_idx in range(num_tracks):
+                    # トラック名
+                    resp = state.osc.query_raw("/live/track/get/name", [track_idx], timeout=0.2)
+                    track_name = f"Track {track_idx}"
+                    if resp:
+                        for addr, params in resp:
+                            if len(params) > 1:
+                                track_name = params[1]
+                    
+                    # ボリューム
+                    resp = state.osc.query_raw("/live/track/get/volume", [track_idx], timeout=0.2)
+                    volume = 0
+                    if resp:
+                        for addr, params in resp:
+                            if len(params) > 1:
+                                volume = params[1]
+                    
+                    # デバイス
+                    resp = state.osc.query_raw("/live/track/get/devices/name", [track_idx], timeout=0.2)
+                    devices = []
+                    if resp:
+                        for addr, params in resp:
+                            if len(params) > 1:
+                                devices = params[1:]
+                    
+                    # クリップ情報
+                    clips = []
+                    for scene_idx in range(min(num_scenes, 8)):  # 最大8シーン
+                        resp = state.osc.query_raw("/live/clip_slot/get/has_clip", [track_idx, scene_idx], timeout=0.1)
+                        has_clip = False
+                        if resp:
+                            for addr, params in resp:
+                                if len(params) > 2:
+                                    has_clip = params[2]
+                        clips.append("●" if has_clip else "○")
+                    
+                    result += f"\n[{track_idx}] {track_name}\n"
+                    result += f"    Vol: {volume:.2f} | Devices: {', '.join(devices[:3]) if devices else 'None'}\n"
+                    result += f"    Clips: {' '.join(clips)}\n"
+                
+                # シーン名
+                result += "\n### シーン一覧\n"
+                for scene_idx in range(num_scenes):
+                    resp = state.osc.query_raw("/live/scene/get/name", [scene_idx], timeout=0.1)
+                    scene_name = f"Scene {scene_idx}"
+                    if resp:
+                        for addr, params in resp:
+                            if len(params) > 1:
+                                scene_name = params[1]
+                    result += f"  [{scene_idx}] {scene_name}\n"
+            else:
+                result = "プロジェクト概要（モック）"
+        
+        elif name == "set_all_clips_length":
+            bars = args.get("bars", 8)
+            beats = bars * 4  # 1小節 = 4拍
+            
+            if not state.mock_mode and state.osc:
+                result = f"⚠️ AbletonOSCではクリップ長の変更がサポートされていません。\n\n"
+                result += f"**手動で設定してください：**\n"
+                result += f"1. Ctrl+A で全クリップを選択\n"
+                result += f"2. クリップビューを開く\n"
+                result += f"3. Loop Length を {bars} bars ({beats} beats) に設定\n\n"
+                result += f"または、各クリップをダブルクリックして個別に設定"
+            else:
+                result = f"クリップ長設定（モック）: {bars}小節"
+        
+        elif name == "create_lofi_project":
+            tempo = args.get("tempo", 85)
+            key = args.get("key", "Am")
+            
+            if not state.mock_mode and state.osc:
+                import time
+                result = "🎹 Lo-Fi Hip Hop プロジェクト作成中...\n\n"
+                
+                # テンポ設定
+                state.osc.set_tempo(tempo)
+                state.tempo = tempo
+                result += f"✅ テンポ: {tempo} BPM\n"
+                time.sleep(0.1)
+                
+                # トラック構成
+                tracks = [
+                    {"name": "Drums", "type": "drum", "pattern": "basic_beat", "bars": 2},
+                    {"name": "Bass", "type": "bass", "style": "basic", "bars": 4},
+                    {"name": "Chords", "type": "chords", "style": "lofi", "bars": 4},
+                    {"name": "Melody", "type": "melody", "bars": 4},
+                ]
+                
+                for i, track_def in enumerate(tracks):
+                    state.osc.create_midi_track(i)
+                    time.sleep(0.05)
+                    state.osc.set_track_name(i, track_def["name"])
+                    time.sleep(0.05)
+                    state.osc.create_clip(i, 0, track_def["bars"] * 4.0)
+                    time.sleep(0.05)
+                    
+                    # パターン生成
+                    root = key[0]  # "Am" -> "A"
+                    scale_type = "minor" if "m" in key else "major"
+                    
+                    if track_def["type"] == "drum":
+                        notes = DrumPattern.basic_beat(track_def["bars"])
+                    elif track_def["type"] == "bass":
+                        notes = create_bassline(root=root, scale=scale_type, bars=track_def["bars"], style="basic")
+                    elif track_def["type"] == "chords":
+                        # create_chordsは2次元リストを返すのでフラットにする
+                        chord_notes = create_chords(root=root, scale=scale_type, bars=track_def["bars"], style="lofi")
+                        notes = []
+                        for chord in chord_notes:
+                            notes.extend(chord)
+                    elif track_def["type"] == "melody":
+                        notes = create_melody(root=root, scale=scale_type, bars=track_def["bars"])
+                    else:
+                        notes = []
+                    
+                    if notes:
+                        state.osc.add_notes(i, 0, notes)
+                    time.sleep(0.05)
+                    
+                    result += f"✅ Track {i}: {track_def['name']}\n"
+                
+                state.track_counter = len(tracks)
+                state.key = key
+                
+                result += f"\n🎵 キー: {key}\n"
+                result += "\n✅ プロジェクト作成完了！\n\n"
+                result += "**次のステップ：**\n"
+                result += "1. 各トラックにインストゥルメントを追加\n"
+                result += "2. エフェクトを追加（Saturator, Reverb, Auto Filter等）\n"
+                result += "3. 「アレンジメントを自動構築して」と言ってください"
+            else:
+                result = f"Lo-Fiプロジェクト作成（モック）: {tempo}BPM, {key}"
         
         else:
             result = f"[ERR] 未知のツール: {name}"
