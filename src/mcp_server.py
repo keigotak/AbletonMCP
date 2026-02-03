@@ -855,13 +855,15 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
         elif name == "osc_send":
             address = args["address"]
             osc_args = args.get("args", [])
-            
+
             if not state.mock_mode and state.osc:
                 responses = state.osc.query_raw(address, osc_args, timeout=0.5)
                 result = f"OSC: {address} {osc_args}\n"
                 result += f"Response ({len(responses)}):\n"
                 for addr, params in responses:
-                    result += f"  {addr}: {params}\n"
+                    # パラメータを文字列として整形
+                    params_str = ", ".join(str(p) for p in params)
+                    result += f"  {addr}: {params_str}\n"
                 if not responses:
                     result += "  (no response)"
             else:
@@ -882,7 +884,9 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
                     if devices_resp:
                         for addr, params in devices_resp:
                             if params:
-                                track_line += f" {params}"
+                                # デバイス名のみ抽出（文字列のみ）
+                                device_names = [str(p) for p in params if isinstance(p, str)]
+                                track_line += f" {', '.join(device_names)}"
                     result += track_line + "\n"
                     
                     # 各デバイスのパラメータ（最大5デバイス）
@@ -891,7 +895,9 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
                         if params_resp:
                             for addr, params in params_resp:
                                 if len(params) > 2:
-                                    result += f"  Device {dev_idx}: {params[2:][:10]}...\n"  # 最初の10パラメータ
+                                    # パラメータ名を文字列として整形
+                                    param_names = [str(p) for p in params[2:][:10] if isinstance(p, str)]
+                                    result += f"  Device {dev_idx}: {', '.join(param_names)}...\n"
                                     break
                         else:
                             break  # デバイスがない
@@ -1091,8 +1097,9 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
                     if resp:
                         for addr, params in resp:
                             if len(params) > 1:
-                                devices = params[1:]
-                    
+                                # 文字列のみ抽出
+                                devices = [str(p) for p in params[1:] if isinstance(p, str)]
+
                     # クリップ情報
                     clips = []
                     for scene_idx in range(min(num_scenes, 8)):  # 最大8シーン
@@ -1103,7 +1110,7 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
                                 if len(params) > 2:
                                     has_clip = params[2]
                         clips.append("●" if has_clip else "○")
-                    
+
                     result += f"\n[{track_idx}] {track_name}\n"
                     result += f"    Vol: {volume:.2f} | Devices: {', '.join(devices[:3]) if devices else 'None'}\n"
                     result += f"    Clips: {' '.join(clips)}\n"

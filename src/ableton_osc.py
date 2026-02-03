@@ -359,8 +359,9 @@ class AbletonOSC:
         pass
         
     def _on_any_message(self, address: str, *args):
-        """デバッグ用: 全メッセージをログ"""
-        print(f"[MSG] OSC: {address} {args}")
+        """デバッグ用: 全メッセージをログ（MCP使用時はstderrに出力）"""
+        import sys
+        print(f"[MSG] OSC: {address} {args}", file=sys.stderr)
 
 
 # ドラムパターン用のヘルパー
