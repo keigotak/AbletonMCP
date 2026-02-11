@@ -266,7 +266,18 @@ async def handle_list_tools() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "track_index": {"type": "integer"},
-                    "effect_type": {"type": "string", "enum": ["reverb", "delay", "chorus", "distortion", "compressor", "eq", "filter"]}
+                    "effect_type": {"type": "string", "enum": [
+                        "align_delay", "amp", "audio_effect_rack", "auto_filter", "auto_pan",
+                        "auto_shift", "beat_repeat", "cabinet", "channel_eq", "chorus",
+                        "compressor", "corpus", "delay", "drum_buss", "dynamic_tube",
+                        "echo", "envelope_follower", "eq", "eq_three", "erosion",
+                        "filter_delay", "gate", "glue_compressor", "grain_delay",
+                        "hybrid_reverb", "lfo", "limiter", "looper", "multiband_dynamics",
+                        "overdrive", "pedal", "phaser", "redux", "resonators",
+                        "reverb", "roar", "saturator", "shaper", "shifter",
+                        "spectral_resonator", "spectral_time", "spectrum", "tuner",
+                        "utility", "vinyl_distortion", "vocoder"
+                    ]}
                 },
                 "required": ["track_index", "effect_type"]
             }
@@ -807,12 +818,53 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
             effect = args["effect_type"]
             
             effect_map = {
-                "reverb": "Audio Effects/Reverb",
-                "delay": "Audio Effects/Delay",
-                "chorus": "Audio Effects/Chorus",
-                "distortion": "Audio Effects/Saturator",
+                "align_delay": "Audio Effects/Align Delay",
+                "amp": "Audio Effects/Amp",
+                "audio_effect_rack": "Audio Effects/Audio Effect Rack",
+                "auto_filter": "Audio Effects/Auto Filter",
+                "auto_pan": "Audio Effects/Auto Pan-Tremolo",
+                "auto_shift": "Audio Effects/Auto Shift",
+                "beat_repeat": "Audio Effects/Beat Repeat",
+                "cabinet": "Audio Effects/Cabinet",
+                "channel_eq": "Audio Effects/Channel EQ",
+                "chorus": "Audio Effects/Chorus-Ensemble",
                 "compressor": "Audio Effects/Compressor",
+                "corpus": "Audio Effects/Corpus",
+                "delay": "Audio Effects/Delay",
+                "drum_buss": "Audio Effects/Drum Buss",
+                "dynamic_tube": "Audio Effects/Dynamic Tube",
+                "echo": "Audio Effects/Echo",
+                "envelope_follower": "Audio Effects/Envelope Follower",
                 "eq": "Audio Effects/EQ Eight",
+                "eq_three": "Audio Effects/EQ Three",
+                "erosion": "Audio Effects/Erosion",
+                "filter_delay": "Audio Effects/Filter Delay",
+                "gate": "Audio Effects/Gate",
+                "glue_compressor": "Audio Effects/Glue Compressor",
+                "grain_delay": "Audio Effects/Grain Delay",
+                "hybrid_reverb": "Audio Effects/Hybrid Reverb",
+                "lfo": "Audio Effects/LFO",
+                "limiter": "Audio Effects/Limiter",
+                "looper": "Audio Effects/Looper",
+                "multiband_dynamics": "Audio Effects/Multiband Dynamics",
+                "overdrive": "Audio Effects/Overdrive",
+                "pedal": "Audio Effects/Pedal",
+                "phaser": "Audio Effects/Phaser-Flanger",
+                "redux": "Audio Effects/Redux",
+                "resonators": "Audio Effects/Resonators",
+                "reverb": "Audio Effects/Reverb",
+                "roar": "Audio Effects/Roar",
+                "saturator": "Audio Effects/Saturator",
+                "shaper": "Audio Effects/Shaper",
+                "shifter": "Audio Effects/Shifter",
+                "spectral_resonator": "Audio Effects/Spectral Resonator",
+                "spectral_time": "Audio Effects/Spectral Time",
+                "spectrum": "Audio Effects/Spectrum",
+                "tuner": "Audio Effects/Tuner",
+                "utility": "Audio Effects/Utility",
+                "vinyl_distortion": "Audio Effects/Vinyl Distortion",
+                "vocoder": "Audio Effects/Vocoder",
+                "distortion": "Audio Effects/Saturator",
                 "filter": "Audio Effects/Auto Filter",
             }
             
@@ -1094,8 +1146,8 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
                         if state.auto_play_cancel:
                             break
                         state.osc.send_message("/live/scene/fire", [scene_idx])
-                        # 絶対時間で次のシーン発火タイミングを計算（50ms早めに発火してドリフト防止）
-                        next_fire_time = start_time + (i + 1) * wait_time - 0.05
+                        # 絶対時間で次のシーン発火タイミングを計算（200ms早めに発火してドリフト防止）
+                        next_fire_time = start_time + (i + 1) * wait_time - 0.2
                         while time.time() < next_fire_time:
                             if state.auto_play_cancel:
                                 break
