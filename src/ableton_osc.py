@@ -315,6 +315,46 @@ class AbletonOSC:
         self._params_response = None
         self.send_message("/live/device/get/parameters/name", [track_index, device_index])
         
+    # =========================
+    # Automation (エンベロープ)
+    # =========================
+
+    def add_automation_step(
+        self,
+        track_index: int,
+        clip_index: int,
+        device_index: int,
+        param_index: int,
+        time: float,
+        value: float,
+        duration: float
+    ):
+        """クリップにオートメーションステップを挿入"""
+        self.send_message(
+            "/live/clip/add_automation",
+            [track_index, clip_index, device_index, param_index, time, value, duration]
+        )
+
+    def clear_automation(
+        self,
+        track_index: int,
+        clip_index: int,
+        device_index: int,
+        param_index: int
+    ):
+        """特定パラメータのオートメーションをクリア"""
+        self.send_message(
+            "/live/clip/clear_automation",
+            [track_index, clip_index, device_index, param_index]
+        )
+
+    def clear_all_automation(self, track_index: int, clip_index: int):
+        """全オートメーションをクリア"""
+        self.send_message(
+            "/live/clip/clear_all_automation",
+            [track_index, clip_index]
+        )
+
     # ミキサー関連
     def set_track_volume(self, track_index: int, volume: float):
         """トラックボリュームを設定 (0.0-1.0)"""

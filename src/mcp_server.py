@@ -30,6 +30,7 @@ from src.mixing_assistant import suggest_mix_improvements
 from src.arrangement_generator import (
     create_arrangement, describe_arrangement, get_available_genres
 )
+from src.automation_generator import generate_automation_points
 
 
 # グローバル状態
@@ -482,6 +483,121 @@ async def handle_list_tools() -> list[types.Tool]:
                     "tempo": {"type": "number", "description": "テンポ（BPM）", "default": 85},
                     "key": {"type": "string", "description": "キー（例: Am, C, Fm）", "default": "Am"}
                 }
+            }
+        ),
+
+        # オートメーション
+        types.Tool(
+            name="add_automation",
+            description="クリップにオートメーションカーブを設定（フィルタースイープ、ボリュームフェード等）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "track_index": {"type": "integer", "description": "トラック番号"},
+                    "clip_index": {"type": "integer", "description": "クリップ番号", "default": 0},
+                    "device_index": {"type": "integer", "description": "デバイス番号（音源=0, エフェクト=1,2,...）"},
+                    "param_index": {"type": "integer", "description": "パラメータ番号"},
+                    "shape": {
+                        "type": "string",
+                        "enum": ["linear", "exponential", "s_curve", "sine", "step"],
+                        "description": "カーブ形状"
+                    },
+                    "start_value": {"type": "number", "description": "開始値（0.0-1.0）"},
+                    "end_value": {"type": "number", "description": "終了値（0.0-1.0）"},
+                    "start_beat": {"type": "number", "description": "開始位置（拍）", "default": 0.0},
+                    "duration_beats": {"type": "number", "description": "長さ（拍）。省略時はクリップ全体"}
+                },
+                "required": ["track_index", "device_index", "param_index", "shape", "start_value", "end_value"]
+            }
+        ),
+        types.Tool(
+            name="clear_automation",
+            description="オートメーションをクリア（特定パラメータまたは全て）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "track_index": {"type": "integer", "description": "トラック番号"},
+                    "clip_index": {"type": "integer", "description": "クリップ番号", "default": 0},
+                    "device_index": {"type": "integer", "description": "デバイス番号（省略時は全クリア）"},
+                    "param_index": {"type": "integer", "description": "パラメータ番号（省略時は全クリア）"}
+                },
+                "required": ["track_index"]
+            }
+        ),
+        types.Tool(
+            name="add_filter_sweep",
+            description="フィルタースイープを追加（Auto Filterの周波数を自動変化）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "track_index": {"type": "integer", "description": "トラック番号"},
+                    "clip_index": {"type": "integer", "description": "クリップ番号", "default": 0},
+                    "direction": {
+                        "type": "string",
+                        "enum": ["up", "down", "updown"],
+                        "description": "スイープ方向"
+                    },
+                    "bars": {"type": "integer", "description": "小節数", "default": 4}
+                },
+                "required": ["track_index", "direction"]
+            }
+        ),
+        types.Tool(
+            name="add_volume_fade",
+            description="ボリュームのフェードイン/アウトを追加",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "track_index": {"type": "integer", "description": "トラック番号"},
+                    "clip_index": {"type": "integer", "description": "クリップ番号", "default": 0},
+                    "fade_type": {
+                        "type": "string",
+                        "enum": ["in", "out"],
+                        "description": "フェードタイプ"
+                    },
+                    "bars": {"type": "integer", "description": "小節数", "default": 2}
+                },
+                "required": ["track_index", "fade_type"]
+            }
+        ),
+
+        # プロジェクト構成表
+        types.Tool(
+            name="get_project_table",
+            description="プロジェクトの構成表を生成（シーン×トラックのクリップ配置、小節数、テンポ）",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        ),
+
+        # 全デバイス・パラメータ分析 + 構成表
+        types.Tool(
+            name="get_full_project_analysis",
+            description="全トラックのデバイス・パラメータ一覧と曲構成表を同時出力。オートメーション戦略立案用",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        ),
+
+        # Chordsオートメーションプリセット
+        types.Tool(
+            name="apply_chords_automation",
+            description="Chordsトラックに構成に合わせたオートメーションを一括適用（Auto Filter Freq, Chorus D/W, E-Piano Room）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "track_index": {"type": "integer", "description": "Chordsトラック番号"},
+                    "intensity": {
+                        "type": "number",
+                        "description": "強度（0.5=控えめ, 1.0=標準, 1.5=強め）",
+                        "default": 1.0
+                    }
+                },
+                "required": ["track_index"]
             }
         ),
     ]
@@ -973,17 +1089,17 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
                 result += f"  シーン: {start_scene} → {end_scene}\n\n"
                 
                 def play_sequence():
-                    for scene_idx in range(start_scene, end_scene + 1):
+                    start_time = time.time()
+                    for i, scene_idx in enumerate(range(start_scene, end_scene + 1)):
                         if state.auto_play_cancel:
                             break
                         state.osc.send_message("/live/scene/fire", [scene_idx])
-                        # 短い間隔でキャンセルチェック
-                        elapsed = 0
-                        while elapsed < wait_time:
+                        # 絶対時間で次のシーン発火タイミングを計算（50ms早めに発火してドリフト防止）
+                        next_fire_time = start_time + (i + 1) * wait_time - 0.05
+                        while time.time() < next_fire_time:
                             if state.auto_play_cancel:
                                 break
-                            time.sleep(0.1)
-                            elapsed += 0.1
+                            time.sleep(0.05)
                 
                 # バックグラウンドで実行
                 state.auto_play_thread = threading.Thread(target=play_sequence)
@@ -1209,9 +1325,739 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
             else:
                 result = f"Lo-Fiプロジェクト作成（モック）: {tempo}BPM, {key}"
         
+        # ========== オートメーション ==========
+        elif name == "add_automation":
+            track_idx = args["track_index"]
+            clip_idx = args.get("clip_index", 0)
+            device_idx = args["device_index"]
+            param_idx = args["param_index"]
+            shape = args["shape"]
+            start_val = args["start_value"]
+            end_val = args["end_value"]
+            start_beat = args.get("start_beat", 0.0)
+            duration_beats = args.get("duration_beats")
+
+            if duration_beats is None:
+                # クリップの長さを取得（デフォルト16拍=4小節）
+                if not state.mock_mode and state.osc:
+                    length_result = state.osc.query("/live/clip/get/length", [track_idx, clip_idx])
+                    if length_result and len(length_result) > 2:
+                        duration_beats = float(length_result[2])
+                    else:
+                        duration_beats = 16.0
+                else:
+                    duration_beats = 16.0
+
+            points = generate_automation_points(
+                shape=shape,
+                start_val=start_val,
+                end_val=end_val,
+                start_time=start_beat,
+                duration_beats=duration_beats,
+                resolution=32
+            )
+
+            if not state.mock_mode and state.osc:
+                import time as time_mod
+                # クリップを発火してから書き込む（再生中でないとオートメーションが反映されない）
+                was_playing = state.is_playing
+                state.osc.send_message("/live/clip/fire", [track_idx, clip_idx])
+                time_mod.sleep(0.1)
+                # まず既存のオートメーションをクリア
+                state.osc.clear_automation(track_idx, clip_idx, device_idx, param_idx)
+                time_mod.sleep(0.05)
+                # ポイントを書き込み
+                for t, v, d in points:
+                    state.osc.add_automation_step(track_idx, clip_idx, device_idx, param_idx, t, v, d)
+                    time_mod.sleep(0.01)
+                # 元々再生中でなければ停止
+                if not was_playing:
+                    state.osc.send_message("/live/song/stop_playing", [])
+                    time_mod.sleep(0.05)
+
+            result = (f"📈 オートメーション追加: Track {track_idx} Clip {clip_idx}\n"
+                      f"  Device {device_idx} Param {param_idx}\n"
+                      f"  Shape: {shape} ({start_val:.2f} → {end_val:.2f})\n"
+                      f"  Range: {start_beat:.1f} ~ {start_beat + duration_beats:.1f} beats\n"
+                      f"  Points: {len(points)}")
+
+        elif name == "clear_automation":
+            track_idx = args["track_index"]
+            clip_idx = args.get("clip_index", 0)
+            device_idx = args.get("device_index")
+            param_idx = args.get("param_index")
+
+            if not state.mock_mode and state.osc:
+                if device_idx is not None and param_idx is not None:
+                    state.osc.clear_automation(track_idx, clip_idx, device_idx, param_idx)
+                    result = f"🗑️ オートメーションクリア: Track {track_idx} Clip {clip_idx} Device {device_idx} Param {param_idx}"
+                else:
+                    state.osc.clear_all_automation(track_idx, clip_idx)
+                    result = f"🗑️ 全オートメーションクリア: Track {track_idx} Clip {clip_idx}"
+            else:
+                result = f"オートメーションクリア（モック）"
+
+        elif name == "add_filter_sweep":
+            track_idx = args["track_index"]
+            clip_idx = args.get("clip_index", 0)
+            direction = args["direction"]
+            bars = args.get("bars", 4)
+            duration_beats = bars * 4.0
+
+            # Auto Filterの周波数パラメータを探す
+            filter_device_idx = None
+            filter_freq_param_idx = None
+
+            if not state.mock_mode and state.osc:
+                import time as time_mod
+                # デバイス一覧を取得してAuto Filterを探す
+                devices_resp = state.osc.query_raw("/live/track/get/devices/name", [track_idx], timeout=0.3)
+                if devices_resp:
+                    for addr, params in devices_resp:
+                        if params:
+                            # params = (track_index, "device0", "device1", ...) なので文字列だけカウント
+                            str_idx = 0
+                            for p in params:
+                                if isinstance(p, str):
+                                    if "Auto Filter" in p:
+                                        filter_device_idx = str_idx
+                                        break
+                                    str_idx += 1
+
+                if filter_device_idx is None:
+                    # Auto Filterがない場合は追加
+                    state.osc.load_device(track_idx, "Audio Effects/Auto Filter")
+                    time_mod.sleep(0.3)
+                    # 再取得
+                    devices_resp = state.osc.query_raw("/live/track/get/devices/name", [track_idx], timeout=0.3)
+                    if devices_resp:
+                        for addr, params in devices_resp:
+                            if params:
+                                str_idx = 0
+                                for p in params:
+                                    if isinstance(p, str):
+                                        if "Auto Filter" in p:
+                                            filter_device_idx = str_idx
+                                            break
+                                        str_idx += 1
+
+                if filter_device_idx is not None:
+                    # Frequencyパラメータを探す（通常index 1）
+                    params_resp = state.osc.query_raw(
+                        "/live/device/get/parameters/name",
+                        [track_idx, filter_device_idx], timeout=0.3
+                    )
+                    if params_resp:
+                        for addr, params in params_resp:
+                            for i, p in enumerate(params):
+                                if isinstance(p, str) and "Frequency" in p:
+                                    filter_freq_param_idx = i - 2  # 最初の2つはtrack/device index
+                                    break
+
+                    if filter_freq_param_idx is None:
+                        filter_freq_param_idx = 1  # デフォルト
+
+                    # スイープポイント生成
+                    if direction == "up":
+                        points = generate_automation_points("exponential", 0.1, 0.9, 0.0, duration_beats, 32)
+                    elif direction == "down":
+                        points = generate_automation_points("exponential", 0.9, 0.1, 0.0, duration_beats, 32)
+                    else:  # updown
+                        half = duration_beats / 2
+                        points_up = generate_automation_points("exponential", 0.1, 0.9, 0.0, half, 16)
+                        points_down = generate_automation_points("exponential", 0.9, 0.1, half, half, 16)
+                        points = points_up + points_down
+
+                    # クリップを発火してから書き込む（再生中でないとオートメーションが反映されない）
+                    was_playing = state.is_playing
+                    state.osc.send_message("/live/clip/fire", [track_idx, clip_idx])
+                    time_mod.sleep(0.1)
+                    # クリア＆書き込み
+                    state.osc.clear_automation(track_idx, clip_idx, filter_device_idx, filter_freq_param_idx)
+                    time_mod.sleep(0.05)
+                    for t, v, d in points:
+                        state.osc.add_automation_step(
+                            track_idx, clip_idx, filter_device_idx, filter_freq_param_idx, t, v, d
+                        )
+                        time_mod.sleep(0.01)
+                    # 元々再生中でなければ停止
+                    if not was_playing:
+                        state.osc.send_message("/live/song/stop_playing", [])
+                        time_mod.sleep(0.05)
+
+                    result = (f"🌊 フィルタースイープ追加: Track {track_idx}\n"
+                              f"  Direction: {direction}\n"
+                              f"  Duration: {bars}小節\n"
+                              f"  Device: {filter_device_idx}, Param: {filter_freq_param_idx}\n"
+                              f"  Points: {len(points)}")
+                else:
+                    result = "[ERR] Auto Filterが見つかりませんでした"
+            else:
+                result = f"フィルタースイープ（モック）: Track {track_idx} {direction} {bars}小節"
+
+        elif name == "add_volume_fade":
+            track_idx = args["track_index"]
+            clip_idx = args.get("clip_index", 0)
+            fade_type = args["fade_type"]
+            bars = args.get("bars", 2)
+            duration_beats = bars * 4.0
+
+            # Mixer Device (トラックボリューム) のパラメータ
+            # Abletonではミキサーはデバイスチェーンの一部ではないので、
+            # トラックボリュームのオートメーションは別のアプローチが必要
+            # ここではクリップのGain（ある場合）またはUtilityのGainを使う
+
+            if not state.mock_mode and state.osc:
+                import time as time_mod
+
+                # Utilityデバイスを探す、なければ追加
+                utility_device_idx = None
+                gain_param_idx = None
+
+                devices_resp = state.osc.query_raw("/live/track/get/devices/name", [track_idx], timeout=0.3)
+                if devices_resp:
+                    for addr, params in devices_resp:
+                        if params:
+                            str_idx = 0
+                            for p in params:
+                                if isinstance(p, str):
+                                    if "Utility" in p:
+                                        utility_device_idx = str_idx
+                                        break
+                                    str_idx += 1
+
+                if utility_device_idx is None:
+                    state.osc.load_device(track_idx, "Audio Effects/Utility")
+                    time_mod.sleep(0.3)
+                    devices_resp = state.osc.query_raw("/live/track/get/devices/name", [track_idx], timeout=0.3)
+                    if devices_resp:
+                        for addr, params in devices_resp:
+                            if params:
+                                str_idx = 0
+                                for p in params:
+                                    if isinstance(p, str):
+                                        if "Utility" in p:
+                                            utility_device_idx = str_idx
+                                            break
+                                        str_idx += 1
+
+                if utility_device_idx is not None:
+                    # Gainパラメータを探す
+                    params_resp = state.osc.query_raw(
+                        "/live/device/get/parameters/name",
+                        [track_idx, utility_device_idx], timeout=0.3
+                    )
+                    if params_resp:
+                        for addr, params in params_resp:
+                            for i, p in enumerate(params):
+                                if isinstance(p, str) and "Gain" in p:
+                                    gain_param_idx = i - 2
+                                    break
+
+                    if gain_param_idx is None:
+                        gain_param_idx = 1  # デフォルト
+
+                    if fade_type == "in":
+                        points = generate_automation_points("s_curve", 0.0, 0.5, 0.0, duration_beats, 32)
+                    else:  # out
+                        points = generate_automation_points("s_curve", 0.5, 0.0, 0.0, duration_beats, 32)
+
+                    # クリップを発火してから書き込む（再生中でないとオートメーションが反映されない）
+                    was_playing = state.is_playing
+                    state.osc.send_message("/live/clip/fire", [track_idx, clip_idx])
+                    time_mod.sleep(0.1)
+                    state.osc.clear_automation(track_idx, clip_idx, utility_device_idx, gain_param_idx)
+                    time_mod.sleep(0.05)
+                    for t, v, d in points:
+                        state.osc.add_automation_step(
+                            track_idx, clip_idx, utility_device_idx, gain_param_idx, t, v, d
+                        )
+                        time_mod.sleep(0.01)
+                    # 元々再生中でなければ停止
+                    if not was_playing:
+                        state.osc.send_message("/live/song/stop_playing", [])
+                        time_mod.sleep(0.05)
+
+                    result = (f"🔊 ボリュームフェード追加: Track {track_idx}\n"
+                              f"  Type: fade {fade_type}\n"
+                              f"  Duration: {bars}小節\n"
+                              f"  Device: {utility_device_idx}, Param: {gain_param_idx}\n"
+                              f"  Points: {len(points)}")
+                else:
+                    result = "[ERR] Utilityデバイスが見つかりませんでした"
+            else:
+                result = f"ボリュームフェード（モック）: Track {track_idx} fade {fade_type} {bars}小節"
+
+        elif name == "get_full_project_analysis":
+            if not state.mock_mode and state.osc:
+                import time as time_mod
+
+                lines = []
+
+                # --- テンポ・基本情報 ---
+                tempo = state.tempo
+                num_tracks_resp = state.osc.query("/live/song/get/num_tracks", [])
+                num_scenes_resp = state.osc.query("/live/song/get/num_scenes", [])
+                num_tracks = int(num_tracks_resp[0]) if num_tracks_resp else 0
+                num_scenes = int(num_scenes_resp[0]) if num_scenes_resp else 0
+
+                # --- 構成表 ---
+                track_data_resp = state.osc.query_raw(
+                    "/live/song/get/track_data",
+                    [0, num_tracks, "track.name", "clip_slot.has_clip"],
+                    timeout=1.0
+                )
+                clip_len_resp = state.osc.query_raw(
+                    "/live/song/get/track_data",
+                    [0, num_tracks, "clip.length"],
+                    timeout=1.0
+                )
+
+                scene_names = []
+                for i in range(num_scenes):
+                    resp = state.osc.query("/live/scene/get/name", [i])
+                    scene_names.append(resp[1] if resp and len(resp) > 1 else f"Scene {i}")
+                    time_mod.sleep(0.01)
+
+                track_names = []
+                clip_matrix = []
+                if track_data_resp:
+                    for addr, params in track_data_resp:
+                        if params:
+                            idx = 0
+                            for t in range(num_tracks):
+                                track_names.append(str(params[idx]))
+                                idx += 1
+                                row = []
+                                for s in range(num_scenes):
+                                    row.append(bool(params[idx]))
+                                    idx += 1
+                                clip_matrix.append(row)
+
+                clip_lengths = []
+                if clip_len_resp:
+                    for addr, params in clip_len_resp:
+                        if params:
+                            idx = 0
+                            for t in range(num_tracks):
+                                row = []
+                                for s in range(num_scenes):
+                                    val = params[idx]
+                                    try:
+                                        row.append(float(val) if val is not None else None)
+                                    except (ValueError, TypeError):
+                                        row.append(None)
+                                    idx += 1
+                                clip_lengths.append(row)
+
+                lines.append(f"# プロジェクト全体分析")
+                lines.append(f"🎵 テンポ: {tempo} BPM / トラック: {num_tracks} / シーン: {num_scenes}")
+                lines.append("")
+
+                # 構成テーブル
+                lines.append("## 曲構成表")
+                header = "| # | シーン | 小節 |"
+                sep = "|---|---|---|"
+                for tn in track_names:
+                    header += f" {tn} |"
+                    sep += "---|"
+                lines.append(header)
+                lines.append(sep)
+
+                total_bars = 0
+                for s in range(num_scenes):
+                    bars = None
+                    for t in range(num_tracks):
+                        if clip_matrix and clip_matrix[t][s] and clip_lengths and len(clip_lengths) > t and clip_lengths[t][s]:
+                            bars = int(clip_lengths[t][s] / 4)
+                            break
+                    if bars:
+                        total_bars += bars
+                    row = f"| {s} | {scene_names[s]} | {bars or '-'} |"
+                    for t in range(num_tracks):
+                        has = clip_matrix[t][s] if clip_matrix else False
+                        row += " ● |" if has else " - |"
+                    lines.append(row)
+
+                total_sec = total_bars * 4 * 60 / tempo
+                lines.append(f"\n**合計**: {total_bars}小節 / 約{int(total_sec//60)}分{int(total_sec%60)}秒")
+
+                # --- 全デバイス・パラメータ ---
+                lines.append("")
+                lines.append("## 全トラック デバイス・パラメータ一覧")
+
+                # 表示不要なパラメータ（Device On, Macro系）
+                skip_prefixes = ("Device On", "Macro ", "Chain Selector")
+
+                for t in range(num_tracks):
+                    tname = track_names[t] if t < len(track_names) else f"Track {t}"
+                    # デバイス名一覧
+                    dev_names_resp = state.osc.query_raw("/live/track/get/devices/name", [t], timeout=0.3)
+                    dev_names = []
+                    if dev_names_resp:
+                        for addr, params in dev_names_resp:
+                            if params:
+                                for p in params:
+                                    if isinstance(p, str):
+                                        dev_names.append(p)
+
+                    lines.append(f"\n### [{t}] {tname}")
+                    lines.append(f"Devices: {', '.join(dev_names)}")
+
+                    for d_idx, dname in enumerate(dev_names):
+                        # パラメータ名取得
+                        pnames_resp = state.osc.query_raw(
+                            "/live/device/get/parameters/name", [t, d_idx], timeout=0.3
+                        )
+                        pvals_resp = state.osc.query_raw(
+                            "/live/device/get/parameters/value", [t, d_idx], timeout=0.3
+                        )
+                        time_mod.sleep(0.02)
+
+                        pnames = []
+                        pvals = []
+                        if pnames_resp:
+                            for addr, params in pnames_resp:
+                                if params:
+                                    pnames = [str(p) for p in params if isinstance(p, str)]
+                        if pvals_resp:
+                            for addr, params in pvals_resp:
+                                if params:
+                                    # 最初の2つはtrack/device index
+                                    pvals = list(params[2:]) if len(params) > 2 else []
+
+                        if not pnames:
+                            continue
+
+                        lines.append(f"\n**D{d_idx}: {dname}**")
+                        lines.append("| # | パラメータ | 値 |")
+                        lines.append("|---|---|---|")
+
+                        for p_idx, pname in enumerate(pnames):
+                            if any(pname.startswith(skip) for skip in skip_prefixes):
+                                continue
+                            val = pvals[p_idx] if p_idx < len(pvals) else "?"
+                            if isinstance(val, float):
+                                val_str = f"{val:.3f}" if abs(val) < 10 else f"{val:.1f}"
+                            else:
+                                val_str = str(val)
+                            lines.append(f"| {p_idx} | {pname} | {val_str} |")
+
+                result = "\n".join(lines)
+            else:
+                result = "プロジェクト分析（モック）"
+
+        elif name == "get_project_table":
+            if not state.mock_mode and state.osc:
+                import time as time_mod
+
+                # テンポ取得
+                tempo = state.tempo
+
+                # トラック数・シーン数
+                num_tracks_resp = state.osc.query("/live/song/get/num_tracks", [])
+                num_scenes_resp = state.osc.query("/live/song/get/num_scenes", [])
+                num_tracks = int(num_tracks_resp[0]) if num_tracks_resp else 0
+                num_scenes = int(num_scenes_resp[0]) if num_scenes_resp else 0
+
+                # トラック名 + クリップ有無を一括取得
+                track_data_resp = state.osc.query_raw(
+                    "/live/song/get/track_data",
+                    [0, num_tracks, "track.name", "clip_slot.has_clip"],
+                    timeout=1.0
+                )
+
+                # クリップ長さも一括取得
+                clip_len_resp = state.osc.query_raw(
+                    "/live/song/get/track_data",
+                    [0, num_tracks, "clip.length"],
+                    timeout=1.0
+                )
+
+                # シーン名を取得
+                scene_names = []
+                for i in range(num_scenes):
+                    resp = state.osc.query("/live/scene/get/name", [i])
+                    scene_names.append(resp[1] if resp and len(resp) > 1 else f"Scene {i}")
+                    time_mod.sleep(0.01)
+
+                # track_data パース: (name, has_clip*num_scenes, name, has_clip*num_scenes, ...)
+                track_names = []
+                clip_matrix = []  # track_idx -> [bool, bool, ...]
+                if track_data_resp:
+                    for addr, params in track_data_resp:
+                        if params:
+                            idx = 0
+                            for t in range(num_tracks):
+                                tname = str(params[idx])
+                                track_names.append(tname)
+                                idx += 1
+                                row = []
+                                for s in range(num_scenes):
+                                    row.append(bool(params[idx]))
+                                    idx += 1
+                                clip_matrix.append(row)
+
+                # clip_length パース
+                clip_lengths = []  # track_idx -> [float or None, ...]
+                if clip_len_resp:
+                    for addr, params in clip_len_resp:
+                        if params:
+                            idx = 0
+                            for t in range(num_tracks):
+                                row = []
+                                for s in range(num_scenes):
+                                    val = params[idx]
+                                    if val is not None and val != "None":
+                                        try:
+                                            row.append(float(val))
+                                        except (ValueError, TypeError):
+                                            row.append(None)
+                                    else:
+                                        row.append(None)
+                                    idx += 1
+                                clip_lengths.append(row)
+
+                # テーブル生成
+                lines = []
+                lines.append(f"🎵 テンポ: {tempo} BPM / トラック: {num_tracks} / シーン: {num_scenes}")
+                lines.append("")
+
+                # ヘッダ
+                header = "| # | シーン | 小節 |"
+                separator = "|---|---|---|"
+                for tn in track_names:
+                    header += f" {tn} |"
+                    separator += "---|"
+                lines.append(header)
+                lines.append(separator)
+
+                # 各シーン行
+                total_bars = 0
+                for s in range(num_scenes):
+                    # 小節数: そのシーンにあるクリップの長さから算出（4拍=1小節）
+                    bars = None
+                    for t in range(num_tracks):
+                        if clip_matrix and clip_matrix[t][s] and clip_lengths and clip_lengths[t][s]:
+                            bars = int(clip_lengths[t][s] / 4)
+                            break
+                    bars_str = str(bars) if bars else "-"
+                    if bars:
+                        total_bars += bars
+
+                    row = f"| {s} | {scene_names[s]} | {bars_str} |"
+                    for t in range(num_tracks):
+                        has = clip_matrix[t][s] if clip_matrix else False
+                        row += " ● |" if has else " - |"
+                    lines.append(row)
+
+                # 合計
+                total_seconds = total_bars * 4 * 60 / tempo
+                total_min = int(total_seconds // 60)
+                total_sec = int(total_seconds % 60)
+                lines.append("")
+                lines.append(f"**合計**: {total_bars}小節 / 約{total_min}分{total_sec}秒")
+
+                result = "\n".join(lines)
+            else:
+                result = "プロジェクト構成表（モック）"
+
+        elif name == "apply_chords_automation":
+            track_idx = args["track_index"]
+            intensity = args.get("intensity", 1.0)
+
+            if not state.mock_mode and state.osc:
+                import time as time_mod
+
+                # デバイス構成を自動検出
+                # Auto Filter を探す
+                filter_dev = None
+                filter_freq_param = None
+                chorus_dev = None
+                chorus_dw_param = None
+                epiano_dev = 0  # 音源は通常 device 0
+                room_param = None
+
+                devices_resp = state.osc.query_raw("/live/track/get/devices/name", [track_idx], timeout=0.3)
+                if devices_resp:
+                    for addr, params in devices_resp:
+                        if params:
+                            str_idx = 0
+                            for p in params:
+                                if isinstance(p, str):
+                                    if "Auto Filter" in p:
+                                        filter_dev = str_idx
+                                    elif "Chorus" in p or "Ensemble" in p:
+                                        chorus_dev = str_idx
+                                    str_idx += 1
+
+                # パラメータ検出
+                if filter_dev is not None:
+                    resp = state.osc.query_raw("/live/device/get/parameters/name", [track_idx, filter_dev], timeout=0.3)
+                    if resp:
+                        for addr, params in resp:
+                            for i, p in enumerate(params):
+                                if isinstance(p, str) and p == "Frequency":
+                                    filter_freq_param = i - 2
+                                    break
+
+                if chorus_dev is not None:
+                    resp = state.osc.query_raw("/live/device/get/parameters/name", [track_idx, chorus_dev], timeout=0.3)
+                    if resp:
+                        for addr, params in resp:
+                            for i, p in enumerate(params):
+                                if isinstance(p, str) and p == "Dry/Wet":
+                                    chorus_dw_param = i - 2
+                                    break
+
+                # E-Piano Room パラメータ検出
+                resp = state.osc.query_raw("/live/device/get/parameters/name", [track_idx, epiano_dev], timeout=0.3)
+                if resp:
+                    for addr, params in resp:
+                        for i, p in enumerate(params):
+                            if isinstance(p, str) and p == "Room":
+                                room_param = i - 2
+                                break
+
+                # クリップの有無を確認
+                clip_resp = state.osc.query_raw(
+                    "/live/song/get/track_data",
+                    [track_idx, track_idx + 1, "clip_slot.has_clip"],
+                    timeout=0.5
+                )
+                has_clips = []
+                if clip_resp:
+                    for addr, params in clip_resp:
+                        if params:
+                            has_clips = [bool(p) for p in params]
+
+                # シーン名を取得してセクション判定
+                num_scenes_resp = state.osc.query("/live/song/get/num_scenes", [])
+                num_scenes = int(num_scenes_resp[0]) if num_scenes_resp else 0
+
+                scene_names = []
+                for i in range(num_scenes):
+                    resp = state.osc.query("/live/scene/get/name", [i])
+                    scene_names.append(str(resp[1]).lower() if resp and len(resp) > 1 else "")
+                    time_mod.sleep(0.01)
+
+                # セクションごとのプリセット定義
+                # (filter_start, filter_end, filter_shape,
+                #  chorus_dw_start, chorus_dw_end, chorus_dw_shape,
+                #  room_start, room_end, room_shape)
+                def scale(base_start, base_end, i=intensity):
+                    """intensityで変動幅をスケール（中心値は維持）"""
+                    center = (base_start + base_end) / 2
+                    half = (base_end - base_start) / 2 * i
+                    return (max(0, min(1, center - half)), max(0, min(1, center + half)))
+
+                section_presets = {
+                    "intro":    {"filter": (0.40, 0.55, "exponential"), "chorus_dw": (0.25, 0.35, "linear"),      "room": (0.35, 0.45, "linear")},
+                    "verse":    {"filter": (0.48, 0.52, "sine"),       "chorus_dw": (0.28, 0.32, "sine"),         "room": (0.38, 0.42, "sine")},
+                    "chorus":   {"filter": (0.50, 0.58, "exponential"), "chorus_dw": (0.35, 0.45, "exponential"), "room": (0.45, 0.55, "exponential")},
+                    "bridge":   {"filter": (0.45, 0.55, "sine"),       "chorus_dw": (0.40, 0.50, "exponential"), "room": (0.50, 0.60, "exponential")},
+                    "outro":    {"filter": (0.50, 0.40, "linear"),     "chorus_dw": (0.35, 0.20, "linear"),      "room": (0.45, 0.30, "linear")},
+                }
+                # Chorus 3b: 特別な下降パターン
+                section_presets["chorus_end"] = {
+                    "filter": (0.58, 0.50, "linear"),
+                    "chorus_dw": (0.45, 0.35, "linear"),
+                    "room": (0.55, 0.45, "linear"),
+                }
+
+                def classify_scene(name, idx, total):
+                    """シーン名からセクション種別を判定"""
+                    if "intro" in name:
+                        return "intro"
+                    elif "outro" in name:
+                        return "outro"
+                    elif "bridge" in name or "break" in name:
+                        return "bridge"
+                    elif "chorus" in name or "hook" in name:
+                        # 最後のコーラス系シーンかチェック
+                        remaining = [s for s in scene_names[idx+1:] if "chorus" in s or "hook" in s]
+                        if len(remaining) == 0:
+                            return "chorus_end"
+                        return "chorus"
+                    elif "verse" in name:
+                        return "verse"
+                    else:
+                        return "verse"  # デフォルト
+
+                # 各クリップにオートメーション適用
+                applied = 0
+                skipped = 0
+                details = []
+
+                for scene_idx in range(num_scenes):
+                    if scene_idx >= len(has_clips) or not has_clips[scene_idx]:
+                        continue
+
+                    section = classify_scene(scene_names[scene_idx], scene_idx, num_scenes)
+                    preset = section_presets.get(section, section_presets["verse"])
+
+                    # クリップを発火
+                    state.osc.send_message("/live/clip/fire", [track_idx, scene_idx])
+                    time_mod.sleep(0.1)
+
+                    # Auto Filter Frequency
+                    if filter_dev is not None and filter_freq_param is not None:
+                        s, e = scale(*preset["filter"][:2])
+                        shape = preset["filter"][2]
+                        state.osc.clear_automation(track_idx, scene_idx, filter_dev, filter_freq_param)
+                        time_mod.sleep(0.03)
+                        points = generate_automation_points(shape, s, e, 0.0, 16.0, 32)
+                        for t, v, d in points:
+                            state.osc.add_automation_step(track_idx, scene_idx, filter_dev, filter_freq_param, t, v, d)
+                            time_mod.sleep(0.005)
+
+                    # Chorus Dry/Wet
+                    if chorus_dev is not None and chorus_dw_param is not None:
+                        s, e = scale(*preset["chorus_dw"][:2])
+                        shape = preset["chorus_dw"][2]
+                        state.osc.clear_automation(track_idx, scene_idx, chorus_dev, chorus_dw_param)
+                        time_mod.sleep(0.03)
+                        points = generate_automation_points(shape, s, e, 0.0, 16.0, 32)
+                        for t, v, d in points:
+                            state.osc.add_automation_step(track_idx, scene_idx, chorus_dev, chorus_dw_param, t, v, d)
+                            time_mod.sleep(0.005)
+
+                    # E-Piano Room
+                    if room_param is not None:
+                        s, e = scale(*preset["room"][:2])
+                        shape = preset["room"][2]
+                        state.osc.clear_automation(track_idx, scene_idx, epiano_dev, room_param)
+                        time_mod.sleep(0.03)
+                        points = generate_automation_points(shape, s, e, 0.0, 16.0, 32)
+                        for t, v, d in points:
+                            state.osc.add_automation_step(track_idx, scene_idx, epiano_dev, room_param, t, v, d)
+                            time_mod.sleep(0.005)
+
+                    applied += 1
+                    details.append(f"  [{scene_idx}] {scene_names[scene_idx]} → {section}")
+
+                # 停止
+                state.osc.send_message("/live/song/stop_playing", [])
+
+                devices_used = []
+                if filter_dev is not None:
+                    devices_used.append(f"Auto Filter(D{filter_dev} P{filter_freq_param})")
+                if chorus_dev is not None:
+                    devices_used.append(f"Chorus D/W(D{chorus_dev} P{chorus_dw_param})")
+                if room_param is not None:
+                    devices_used.append(f"Room(D{epiano_dev} P{room_param})")
+
+                result = (f"🎹 Chordsオートメーション適用: Track {track_idx}\n"
+                          f"  Intensity: {intensity}\n"
+                          f"  Devices: {', '.join(devices_used)}\n"
+                          f"  適用: {applied}シーン\n\n"
+                          + "\n".join(details))
+            else:
+                result = "Chordsオートメーション（モック）"
+
         else:
             result = f"[ERR] 未知のツール: {name}"
-            
+
     except Exception as e:
         result = f"[ERR] エラー: {str(e)}"
     
